@@ -52,33 +52,36 @@ def black_scholes_call(s, k, tau, r, sigma):
     return s * norm.cdf(d1) - k * np.exp(-r * tau) * norm.cdf(d2)
 
 
-def plot_spot_and_call(t, paths, k, tau, r, sigma):
-    """Spot paths (top) and constant-maturity call price (bottom) on one figure."""
-    call = black_scholes_call(paths, k, tau, r, sigma)
-    fig, (ax_spot, ax_call) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+def plot_call_quotes(t, paths, k, tau, r, sigma, vol_spread):
+    """Call mid at sigma; bid priced at sigma*(1 - vol_spread), ask at sigma*(1 + vol_spread)."""
+    bid_vol, ask_vol = sigma * (1 - vol_spread), sigma * (1 + vol_spread)
+    mid_px = black_scholes_call(paths, k, tau, r, sigma)
+    bid_px = black_scholes_call(paths, k, tau, r, bid_vol)
+    ask_px = black_scholes_call(paths, k, tau, r, ask_vol)
+    fig, ax = plt.subplots(figsize=(10, 6))
     for i in range(len(paths)):
-        line, = ax_spot.plot(t, paths[i], linewidth=0.8, alpha=0.8)
-        ax_call.plot(t, call[i], linewidth=0.8, alpha=0.8, color=line.get_color())
-    ax_spot.axhline(k, color="black", linestyle="--", linewidth=1, label=f"Strike K={k}")
-    ax_spot.set_ylabel("Spot price")
-    ax_spot.legend()
-    ax_spot.set_title(rf"Spot and Black-Scholes call, constant maturity $\tau$={tau:.3f}y "
-                      rf"(r={r}, $\sigma$={sigma})")
-    ax_call.set_ylabel("Call price")
-    ax_call.set_xlabel("Time (years)")
-    for ax in (ax_spot, ax_call):
-        ax.grid(alpha=0.3)
+        mid, = ax.plot(t, mid_px[i], linewidth=1.0, label=f"Path {i + 1} mid")
+        ax.plot(t, bid_px[i], linewidth=0.8, linestyle="--", color=mid.get_color())
+        ax.plot(t, ask_px[i], linewidth=0.8, linestyle="--", color=mid.get_color())
+        ax.fill_between(t, bid_px[i], ask_px[i], color=mid.get_color(), alpha=0.15)
+    ax.set_xlabel("Time (years)")
+    ax.set_ylabel("Call price")
+    ax.set_title(rf"Bid at $\sigma$={bid_vol:.2f}, ask at $\sigma$={ask_vol:.2f}, mid at $\sigma$={sigma} "
+                 rf"(K={k}, $\tau$={tau:.3f}y, r={r})")
+    ax.legend()
+    ax.grid(alpha=0.3)
     fig.tight_layout()
     return fig
 
 
 if __name__ == "__main__":
     S0, MU, SIGMA = 100.0, 0.05, 0.20
-    T, N_STEPS, N_PATHS = 1.0, 252, 10
+    T, N_STEPS, N_PATHS = 1.0, 252, 3
 
     t, paths = simulate_gbm(S0, MU, SIGMA, T, N_STEPS, N_PATHS, seed=42)
 
     # Option parameters (assumed defaults: change as needed)
     K, TAU, R = 100.0, 21 / 252, 0.03  # ATM strike, ~1 month maturity, 3% rate
-    fig = plot_spot_and_call(t, paths, K, TAU, R, SIGMA)
+    VOL_SPREAD = 0.10  # bid vol = SIGMA * 0.9 (18%), ask vol = SIGMA * 1.1 (22%)
+    fig = plot_call_quotes(t, paths, K, TAU, R, SIGMA, VOL_SPREAD)
     plt.show()
