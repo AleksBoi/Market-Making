@@ -72,26 +72,45 @@ def compute_quotes(paths, k, tau, r, sigma, vol_spread, min_half_spread=0.0):
     return mid_px, bid_px, ask_px
 
 
-def simulate_client_flow(mid_px, bid_px, ask_px, p0_sell, k_sell, p0_buy, k_buy, seed=None):
-    """Random client order flow whose arrival probability decays with quote distance.
+def simulate_client_flow(mid_px, bid_px, ask_px, p0_sell, k_sell, p0_buy, k_buy,
+                         gamma=0.0, seed=None):
+    """Client order flow with inventory-skewed quotes, simulated forward in time.
 
+    Both quotes are shifted by gamma * x_t, where x_t is the inventory carried into
+    step t (contracts, positive = long): down when long, up when short. With h the
+    unskewed distance from the mid:
+        bid distance = h_bid + gamma * x   (mid - bid_eff)
+        ask distance = h_ask - gamma * x   (ask_eff - mid)
     Per timestep, independently:
-      client sells (we buy at our bid) with prob p0_sell * exp(-k_sell * (mid - bid))
-      client buys  (we sell at our ask) with prob p0_buy  * exp(-k_buy  * (ask - mid))
-    Distances are in option price units, so k has units of 1/price. A tighter quote
-    (smaller delta) means a higher fill probability, and p0 is the prob at delta = 0.
-    Returns boolean masks (client_sells, client_buys).
+        client sells (we buy at bid_eff) w.p. p0_sell * exp(-k_sell * bid distance)
+        client buys  (we sell at ask_eff) w.p. p0_buy  * exp(-k_buy  * ask distance)
+    so the sell prob picks up exp(-k*gamma*x) and the buy prob exp(+k*gamma*x).
+    Probabilities are capped at 1 and the effective bid is floored at 0. Inventory
+    feeds back into the next step's quotes, hence the loop over time.
+    Returns (client_sells, client_buys, bid_eff, ask_eff); gamma = 0 gives no skew.
     """
     if not (0 <= p0_sell <= 1 and 0 <= p0_buy <= 1):
         raise ValueError("p0_sell and p0_buy must each be in [0, 1]")
     if k_sell < 0 or k_buy < 0:
         raise ValueError("k_sell and k_buy must be non-negative")
     rng = np.random.default_rng(seed)
-    prob_sell = p0_sell * np.exp(-k_sell * (mid_px - bid_px))
-    prob_buy = p0_buy * np.exp(-k_buy * (ask_px - mid_px))
-    client_sells = rng.random(mid_px.shape) < prob_sell
-    client_buys = rng.random(mid_px.shape) < prob_buy
-    return client_sells, client_buys
+    u_sell = rng.random(mid_px.shape)
+    u_buy = rng.random(mid_px.shape)
+    client_sells = np.zeros(mid_px.shape, dtype=bool)
+    client_buys = np.zeros(mid_px.shape, dtype=bool)
+    bid_eff = np.full(mid_px.shape, np.nan)
+    ask_eff = np.full(mid_px.shape, np.nan)
+    inventory = np.zeros(mid_px.shape[0])
+    for j in range(mid_px.shape[1]):
+        shift = gamma * inventory
+        bid_eff[:, j] = np.maximum(bid_px[:, j] - shift, 0.0)  # NaN stays NaN
+        ask_eff[:, j] = ask_px[:, j] - shift
+        prob_sell = np.minimum(p0_sell * np.exp(-k_sell * (mid_px[:, j] - bid_eff[:, j])), 1.0)
+        prob_buy = np.minimum(p0_buy * np.exp(-k_buy * (ask_eff[:, j] - mid_px[:, j])), 1.0)
+        client_sells[:, j] = u_sell[:, j] < prob_sell  # False where not quoting (NaN)
+        client_buys[:, j] = u_buy[:, j] < prob_buy
+        inventory = inventory + client_sells[:, j] - client_buys[:, j]
+    return client_sells, client_buys, bid_eff, ask_eff
 
 
 def plot_call_quotes(t, mid_px, bid_px, ask_px, client_sells, client_buys, title):
@@ -178,8 +197,12 @@ if __name__ == "__main__":
     # Client flow: p(delta) = p0 * exp(-k * delta), delta = distance from mid in price units
     P0_SELL, K_SELL = 0.30, 3.0
     P0_BUY, K_BUY = 0.30, 3.0
-    client_sells, client_buys = simulate_client_flow(
-        mid_px, bid_px, ask_px, P0_SELL, K_SELL, P0_BUY, K_BUY, seed=7)
+    # Inventory skew: shift = GAMMA * q per contract. With gamma = 1 / (2 k sigma^2) and the
+    # variance-weighted inventory x = sigma^2 * q the sigma cancels, leaving 1 / (2k) per
+    # contract (0.167 price units). Raw q with the full gamma would shift by 4.2 per contract.
+    GAMMA = 1 / (2 * K_SELL)
+    client_sells, client_buys, bid_px, ask_px = simulate_client_flow(
+        mid_px, bid_px, ask_px, P0_SELL, K_SELL, P0_BUY, K_BUY, gamma=GAMMA, seed=7)
 
     title = (rf"Bid $\sigma$={SIGMA * (1 - VOL_SPREAD):.2f}, ask $\sigma$={SIGMA * (1 + VOL_SPREAD):.2f}, "
              rf"fill prob $p_0 e^{{-k\delta}}$ (K={K}, $\tau$={TAU:.3f}y, r={R})")
