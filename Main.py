@@ -52,8 +52,26 @@ def black_scholes_call(s, k, tau, r, sigma):
     return s * norm.cdf(d1) - k * np.exp(-r * tau) * norm.cdf(d2)
 
 
-def plot_call_quotes(t, paths, k, tau, r, sigma, vol_spread):
-    """Call mid at sigma; bid priced at sigma*(1 - vol_spread), ask at sigma*(1 + vol_spread)."""
+def simulate_client_flow(shape, p_sell, p_buy, seed=None):
+    """Random client order flow at every timestep.
+
+    At each step, independently: with prob p_sell a client sells (we, the market
+    maker, buy at our bid) and with prob p_buy a client buys (we sell at our ask).
+    Both can happen in the same step. Returns boolean masks (client_sells, client_buys).
+    """
+    if not (0 <= p_sell <= 1 and 0 <= p_buy <= 1):
+        raise ValueError("p_sell and p_buy must each be in [0, 1]")
+    rng = np.random.default_rng(seed)
+    client_sells = rng.random(shape) < p_sell
+    client_buys = rng.random(shape) < p_buy
+    return client_sells, client_buys
+
+
+def plot_call_quotes(t, paths, k, tau, r, sigma, vol_spread, client_sells, client_buys):
+    """Call mid at sigma; bid at sigma*(1 - vol_spread), ask at sigma*(1 + vol_spread).
+
+    Trades are marked on the quotes: client sells hit our bid, client buys lift our ask.
+    """
     bid_vol, ask_vol = sigma * (1 - vol_spread), sigma * (1 + vol_spread)
     mid_px = black_scholes_call(paths, k, tau, r, sigma)
     bid_px = black_scholes_call(paths, k, tau, r, bid_vol)
@@ -64,6 +82,10 @@ def plot_call_quotes(t, paths, k, tau, r, sigma, vol_spread):
         ax.plot(t, bid_px[i], linewidth=0.8, linestyle="--", color=mid.get_color())
         ax.plot(t, ask_px[i], linewidth=0.8, linestyle="--", color=mid.get_color())
         ax.fill_between(t, bid_px[i], ask_px[i], color=mid.get_color(), alpha=0.15)
+        ax.scatter(t[client_sells[i]], bid_px[i][client_sells[i]], marker="v", s=22,
+                   color="red", zorder=3, label="Client sells (we buy at bid)" if i == 0 else None)
+        ax.scatter(t[client_buys[i]], ask_px[i][client_buys[i]], marker="^", s=22,
+                   color="green", zorder=3, label="Client buys (we sell at ask)" if i == 0 else None)
     ax.set_xlabel("Time (years)")
     ax.set_ylabel("Call price")
     ax.set_title(rf"Bid at $\sigma$={bid_vol:.2f}, ask at $\sigma$={ask_vol:.2f}, mid at $\sigma$={sigma} "
@@ -76,12 +98,17 @@ def plot_call_quotes(t, paths, k, tau, r, sigma, vol_spread):
 
 if __name__ == "__main__":
     S0, MU, SIGMA = 100.0, 0.05, 0.20
-    T, N_STEPS, N_PATHS = 1.0, 252, 3
+    T, N_STEPS, N_PATHS = 1.0, 252, 1
 
     t, paths = simulate_gbm(S0, MU, SIGMA, T, N_STEPS, N_PATHS, seed=42)
 
     # Option parameters (assumed defaults: change as needed)
     K, TAU, R = 100.0, 21 / 252, 0.03  # ATM strike, ~1 month maturity, 3% rate
     VOL_SPREAD = 0.10  # bid vol = SIGMA * 0.9 (18%), ask vol = SIGMA * 1.1 (22%)
-    fig = plot_call_quotes(t, paths, K, TAU, R, SIGMA, VOL_SPREAD)
+
+    # Client flow: per-timestep probabilities (each < 0.5, set independently)
+    P_SELL, P_BUY = 0.10, 0.10
+    client_sells, client_buys = simulate_client_flow(paths.shape, P_SELL, P_BUY, seed=7)
+
+    fig = plot_call_quotes(t, paths, K, TAU, R, SIGMA, VOL_SPREAD, client_sells, client_buys)
     plt.show()
