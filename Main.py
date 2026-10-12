@@ -59,15 +59,16 @@ def compute_quotes(paths, k, tau, r, sigma, vol_spread, min_half_spread=0.0):
 
     The vol-based spread collapses towards 0 for far OTM options, so each side is
     kept at least min_half_spread (price units) away from the mid. When the mid is
-    too small to leave that much room above a zero price, there is no bid (NaN),
-    so no client can sell to us at a price that earns nothing.
+    too small to leave that much room above a zero price we quote neither side
+    (both NaN), so we never end up one-sided and no client can trade at a price
+    that earns nothing.
     """
     mid_px = black_scholes_call(paths, k, tau, r, sigma)
     bid_px = black_scholes_call(paths, k, tau, r, sigma * (1 - vol_spread))
     ask_px = black_scholes_call(paths, k, tau, r, sigma * (1 + vol_spread))
-    bid_px = np.where(mid_px > min_half_spread,
-                      np.minimum(bid_px, mid_px - min_half_spread), np.nan)
-    ask_px = np.maximum(ask_px, mid_px + min_half_spread)
+    quoting = mid_px > min_half_spread
+    bid_px = np.where(quoting, np.minimum(bid_px, mid_px - min_half_spread), np.nan)
+    ask_px = np.where(quoting, np.maximum(ask_px, mid_px + min_half_spread), np.nan)
     return mid_px, bid_px, ask_px
 
 
@@ -147,6 +148,21 @@ def plot_pnl(t, equity, title):
     return fig
 
 
+def plot_position(t, inventory, title):
+    """Signed inventory (contracts, positive = long) against time, one line per path."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for i in range(len(inventory)):
+        ax.step(t, inventory[i], where="post", linewidth=1.0, label=f"Path {i + 1}")
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    ax.set_xlabel("Time (years)")
+    ax.set_ylabel(r"Inventory $q_t$ (contracts)")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
 if __name__ == "__main__":
     S0, MU, SIGMA = 100.0, 0.05, 0.20
     T, N_STEPS, N_PATHS = 1.0, 252, 3
@@ -171,5 +187,6 @@ if __name__ == "__main__":
 
     cash, inventory, equity = compute_pnl(mid_px, bid_px, ask_px, client_sells, client_buys)
     fig_pnl = plot_pnl(t, equity, "Cumulative mark-to-market PnL")
+    fig_pos = plot_position(t, inventory, "Position (signed inventory) over time")
 
     plt.show()
