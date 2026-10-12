@@ -5,6 +5,8 @@ Exact discretisation:
 S_{t+dt} = S_t * exp((mu - 0.5 * sigma^2) * dt + sigma * sqrt(dt) * Z),  Z ~ N(0, 1)
 """
 
+import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import norm
@@ -112,9 +114,42 @@ def plot_call_quotes(t, mid_px, bid_px, ask_px, client_sells, client_buys, title
     return fig
 
 
+def compute_pnl(mid_px, bid_px, ask_px, client_sells, client_buys):
+    """Cash, signed inventory and mark-to-market equity at every timestep.
+
+    Client sells: we buy one contract at the bid (cash down, inventory up).
+    Client buys:  we sell one contract at the ask (cash up, inventory down).
+        C_t = C_{t-1} - b_t s_t + a_t u_t
+        q_t = q_{t-1} + s_t - u_t
+        V_t = C_t + q_t m_t
+    Starts from C = 0, q = 0 before the first step. Bid is NaN where we do not
+    quote, but no sell can fill there, so those entries are masked out.
+    """
+    cash = np.cumsum(np.where(client_sells, -bid_px, 0.0)
+                     + np.where(client_buys, ask_px, 0.0), axis=1)
+    inventory = np.cumsum(client_sells.astype(int) - client_buys.astype(int), axis=1)
+    equity = cash + inventory * mid_px
+    return cash, inventory, equity
+
+
+def plot_pnl(t, equity, title):
+    """Cumulative mark-to-market PnL against time, one line per path."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for i in range(len(equity)):
+        ax.plot(t, equity[i], linewidth=1.0, label=f"Path {i + 1}")
+    ax.axhline(0.0, color="black", linewidth=0.8)
+    ax.set_xlabel("Time (years)")
+    ax.set_ylabel(r"Equity $V_t = C_t + q_t m_t$")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
 if __name__ == "__main__":
     S0, MU, SIGMA = 100.0, 0.05, 0.20
-    T, N_STEPS, N_PATHS = 1.0, 252, 1
+    T, N_STEPS, N_PATHS = 1.0, 252, 3
 
     t, paths = simulate_gbm(S0, MU, SIGMA, T, N_STEPS, N_PATHS, seed=42)
 
@@ -133,4 +168,8 @@ if __name__ == "__main__":
     title = (rf"Bid $\sigma$={SIGMA * (1 - VOL_SPREAD):.2f}, ask $\sigma$={SIGMA * (1 + VOL_SPREAD):.2f}, "
              rf"fill prob $p_0 e^{{-k\delta}}$ (K={K}, $\tau$={TAU:.3f}y, r={R})")
     fig = plot_call_quotes(t, mid_px, bid_px, ask_px, client_sells, client_buys, title)
+
+    cash, inventory, equity = compute_pnl(mid_px, bid_px, ask_px, client_sells, client_buys)
+    fig_pnl = plot_pnl(t, equity, "Cumulative mark-to-market PnL")
+
     plt.show()
