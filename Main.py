@@ -52,32 +52,49 @@ def black_scholes_call(s, k, tau, r, sigma):
     return s * norm.cdf(d1) - k * np.exp(-r * tau) * norm.cdf(d2)
 
 
-def simulate_client_flow(shape, p_sell, p_buy, seed=None):
-    """Random client order flow at every timestep.
+def compute_quotes(paths, k, tau, r, sigma, vol_spread, min_half_spread=0.0):
+    """Model mid at sigma; bid priced at sigma*(1 - vol_spread), ask at sigma*(1 + vol_spread).
 
-    At each step, independently: with prob p_sell a client sells (we, the market
-    maker, buy at our bid) and with prob p_buy a client buys (we sell at our ask).
-    Both can happen in the same step. Returns boolean masks (client_sells, client_buys).
+    The vol-based spread collapses towards 0 for far OTM options, so each side is
+    kept at least min_half_spread (price units) away from the mid. When the mid is
+    too small to leave that much room above a zero price, there is no bid (NaN),
+    so no client can sell to us at a price that earns nothing.
     """
-    if not (0 <= p_sell <= 1 and 0 <= p_buy <= 1):
-        raise ValueError("p_sell and p_buy must each be in [0, 1]")
+    mid_px = black_scholes_call(paths, k, tau, r, sigma)
+    bid_px = black_scholes_call(paths, k, tau, r, sigma * (1 - vol_spread))
+    ask_px = black_scholes_call(paths, k, tau, r, sigma * (1 + vol_spread))
+    bid_px = np.where(mid_px > min_half_spread,
+                      np.minimum(bid_px, mid_px - min_half_spread), np.nan)
+    ask_px = np.maximum(ask_px, mid_px + min_half_spread)
+    return mid_px, bid_px, ask_px
+
+
+def simulate_client_flow(mid_px, bid_px, ask_px, p0_sell, k_sell, p0_buy, k_buy, seed=None):
+    """Random client order flow whose arrival probability decays with quote distance.
+
+    Per timestep, independently:
+      client sells (we buy at our bid) with prob p0_sell * exp(-k_sell * (mid - bid))
+      client buys  (we sell at our ask) with prob p0_buy  * exp(-k_buy  * (ask - mid))
+    Distances are in option price units, so k has units of 1/price. A tighter quote
+    (smaller delta) means a higher fill probability, and p0 is the prob at delta = 0.
+    Returns boolean masks (client_sells, client_buys).
+    """
+    if not (0 <= p0_sell <= 1 and 0 <= p0_buy <= 1):
+        raise ValueError("p0_sell and p0_buy must each be in [0, 1]")
+    if k_sell < 0 or k_buy < 0:
+        raise ValueError("k_sell and k_buy must be non-negative")
     rng = np.random.default_rng(seed)
-    client_sells = rng.random(shape) < p_sell
-    client_buys = rng.random(shape) < p_buy
+    prob_sell = p0_sell * np.exp(-k_sell * (mid_px - bid_px))
+    prob_buy = p0_buy * np.exp(-k_buy * (ask_px - mid_px))
+    client_sells = rng.random(mid_px.shape) < prob_sell
+    client_buys = rng.random(mid_px.shape) < prob_buy
     return client_sells, client_buys
 
 
-def plot_call_quotes(t, paths, k, tau, r, sigma, vol_spread, client_sells, client_buys):
-    """Call mid at sigma; bid at sigma*(1 - vol_spread), ask at sigma*(1 + vol_spread).
-
-    Trades are marked on the quotes: client sells hit our bid, client buys lift our ask.
-    """
-    bid_vol, ask_vol = sigma * (1 - vol_spread), sigma * (1 + vol_spread)
-    mid_px = black_scholes_call(paths, k, tau, r, sigma)
-    bid_px = black_scholes_call(paths, k, tau, r, bid_vol)
-    ask_px = black_scholes_call(paths, k, tau, r, ask_vol)
+def plot_call_quotes(t, mid_px, bid_px, ask_px, client_sells, client_buys, title):
+    """Quotes with trades marked: client sells hit our bid, client buys lift our ask."""
     fig, ax = plt.subplots(figsize=(10, 6))
-    for i in range(len(paths)):
+    for i in range(len(mid_px)):
         mid, = ax.plot(t, mid_px[i], linewidth=1.0, label=f"Path {i + 1} mid")
         ax.plot(t, bid_px[i], linewidth=0.8, linestyle="--", color=mid.get_color())
         ax.plot(t, ask_px[i], linewidth=0.8, linestyle="--", color=mid.get_color())
@@ -88,8 +105,7 @@ def plot_call_quotes(t, paths, k, tau, r, sigma, vol_spread, client_sells, clien
                    color="green", zorder=3, label="Client buys (we sell at ask)" if i == 0 else None)
     ax.set_xlabel("Time (years)")
     ax.set_ylabel("Call price")
-    ax.set_title(rf"Bid at $\sigma$={bid_vol:.2f}, ask at $\sigma$={ask_vol:.2f}, mid at $\sigma$={sigma} "
-                 rf"(K={k}, $\tau$={tau:.3f}y, r={r})")
+    ax.set_title(title)
     ax.legend()
     ax.grid(alpha=0.3)
     fig.tight_layout()
@@ -105,10 +121,16 @@ if __name__ == "__main__":
     # Option parameters (assumed defaults: change as needed)
     K, TAU, R = 100.0, 21 / 252, 0.03  # ATM strike, ~1 month maturity, 3% rate
     VOL_SPREAD = 0.10  # bid vol = SIGMA * 0.9 (18%), ask vol = SIGMA * 1.1 (22%)
+    MIN_HALF_SPREAD = 0.20  # minimum distance of bid/ask from mid, in option price units
+    mid_px, bid_px, ask_px = compute_quotes(paths, K, TAU, R, SIGMA, VOL_SPREAD, MIN_HALF_SPREAD)
 
-    # Client flow: per-timestep probabilities (each < 0.5, set independently)
-    P_SELL, P_BUY = 0.10, 0.10
-    client_sells, client_buys = simulate_client_flow(paths.shape, P_SELL, P_BUY, seed=7)
+    # Client flow: p(delta) = p0 * exp(-k * delta), delta = distance from mid in price units
+    P0_SELL, K_SELL = 0.30, 3.0
+    P0_BUY, K_BUY = 0.30, 3.0
+    client_sells, client_buys = simulate_client_flow(
+        mid_px, bid_px, ask_px, P0_SELL, K_SELL, P0_BUY, K_BUY, seed=7)
 
-    fig = plot_call_quotes(t, paths, K, TAU, R, SIGMA, VOL_SPREAD, client_sells, client_buys)
+    title = (rf"Bid $\sigma$={SIGMA * (1 - VOL_SPREAD):.2f}, ask $\sigma$={SIGMA * (1 + VOL_SPREAD):.2f}, "
+             rf"fill prob $p_0 e^{{-k\delta}}$ (K={K}, $\tau$={TAU:.3f}y, r={R})")
+    fig = plot_call_quotes(t, mid_px, bid_px, ask_px, client_sells, client_buys, title)
     plt.show()
