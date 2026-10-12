@@ -156,12 +156,14 @@ def plot_pnl(t, equity, title):
     """Cumulative mark-to-market PnL against time, one line per path."""
     fig, ax = plt.subplots(figsize=(10, 6))
     for i in range(len(equity)):
-        ax.plot(t, equity[i], linewidth=1.0, label=f"Path {i + 1}")
+        ax.plot(t, equity[i], linewidth=1.0 if len(equity) <= 10 else 0.5,
+                alpha=1.0 if len(equity) <= 10 else 0.5, label=f"Path {i + 1}")
     ax.axhline(0.0, color="black", linewidth=0.8)
     ax.set_xlabel("Time (years)")
     ax.set_ylabel(r"Equity $V_t = C_t + q_t m_t$")
     ax.set_title(title)
-    ax.legend()
+    if len(equity) <= 10:
+        ax.legend()
     ax.grid(alpha=0.3)
     fig.tight_layout()
     return fig
@@ -182,9 +184,28 @@ def plot_position(t, inventory, title):
     return fig
 
 
+def plot_pnl_distribution(final_equity, title):
+    """Histogram of final mark-to-market PnL across paths, with mean and median."""
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(final_equity, bins=min(40, max(10, len(final_equity) // 3)),
+            color="tab:blue", alpha=0.7, edgecolor="white")
+    ax.axvline(0.0, color="black", linewidth=0.8)
+    ax.axvline(final_equity.mean(), color="red", linestyle="--",
+               label=f"Mean {final_equity.mean():.2f}")
+    ax.axvline(np.median(final_equity), color="green", linestyle=":",
+               label=f"Median {np.median(final_equity):.2f}")
+    ax.set_xlabel(r"Final equity $V_T$")
+    ax.set_ylabel("Number of paths")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    return fig
+
+
 if __name__ == "__main__":
     S0, MU, SIGMA = 100.0, 0.05, 0.20
-    T, N_STEPS, N_PATHS = 1.0, 252, 3
+    T, N_STEPS, N_PATHS = 1.0, 252, 100
 
     t, paths = simulate_gbm(S0, MU, SIGMA, T, N_STEPS, N_PATHS, seed=42)
 
@@ -197,19 +218,27 @@ if __name__ == "__main__":
     # Client flow: p(delta) = p0 * exp(-k * delta), delta = distance from mid in price units
     P0_SELL, K_SELL = 0.30, 3.0
     P0_BUY, K_BUY = 0.30, 3.0
-    # Inventory skew: shift = GAMMA * q per contract. With gamma = 1 / (2 k sigma^2) and the
-    # variance-weighted inventory x = sigma^2 * q the sigma cancels, leaving 1 / (2k) per
-    # contract (0.167 price units). Raw q with the full gamma would shift by 4.2 per contract.
-    GAMMA = 1 / (2 * K_SELL)
+
+    # Inventory skew: shift = GAMMA * q price units per contract. gamma = 1 / (2 k sigma^2)
+    # applied to the variance-weighted inventory sigma^2 * q gives 1 / (2k), so sigma cancels.
+    USE_SKEW = True  # set False for GAMMA = 0 (no inventory skew)
+    GAMMA = 1 / (2 * K_SELL) if USE_SKEW else 0.0
     client_sells, client_buys, bid_px, ask_px = simulate_client_flow(
         mid_px, bid_px, ask_px, P0_SELL, K_SELL, P0_BUY, K_BUY, gamma=GAMMA, seed=7)
 
     title = (rf"Bid $\sigma$={SIGMA * (1 - VOL_SPREAD):.2f}, ask $\sigma$={SIGMA * (1 + VOL_SPREAD):.2f}, "
              rf"fill prob $p_0 e^{{-k\delta}}$ (K={K}, $\tau$={TAU:.3f}y, r={R})")
-    fig = plot_call_quotes(t, mid_px, bid_px, ask_px, client_sells, client_buys, title)
+    #fig = plot_call_quotes(t, mid_px, bid_px, ask_px, client_sells, client_buys, title)
 
     cash, inventory, equity = compute_pnl(mid_px, bid_px, ask_px, client_sells, client_buys)
-    fig_pnl = plot_pnl(t, equity, "Cumulative mark-to-market PnL")
-    fig_pos = plot_position(t, inventory, "Position (signed inventory) over time")
+    #fig_pnl = plot_pnl(t, equity, "Cumulative mark-to-market PnL")
+    #fig_pos = plot_position(t, inventory, "Position (signed inventory) over time")
+
+    final = equity[:, -1]
+    print(f"Final PnL over {N_PATHS} paths: mean {final.mean():.2f}, median {np.median(final):.2f}, "
+          f"std {final.std(ddof=1):.2f}, min {final.min():.2f}, max {final.max():.2f}, "
+          f"P(PnL>0) {(final > 0).mean():.0%}, mean/std {final.mean() / final.std(ddof=1):.2f}")
+    print(f"Max |inventory| across paths: {np.abs(inventory).max()}")
+    fig_dist = plot_pnl_distribution(final, f"Final PnL distribution ({N_PATHS} paths)")
 
     plt.show()
