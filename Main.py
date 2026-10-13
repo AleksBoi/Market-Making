@@ -76,15 +76,21 @@ def simulate_client_flow(mid_px, bid_px, ask_px, p0_sell, k_sell, p0_buy, k_buy,
                          gamma=0.0, seed=None):
     """Client order flow with inventory-skewed quotes, simulated forward in time.
 
-    Both quotes are shifted by gamma * x_t, where x_t is the inventory carried into
-    step t (contracts, positive = long): down when long, up when short. With h the
-    unskewed distance from the mid:
-        bid distance = h_bid + gamma * x   (mid - bid_eff)
-        ask distance = h_ask - gamma * x   (ask_eff - mid)
+    Distances are RELATIVE: a fraction of the mid (0.10 = quote 10% away from mid), so
+    k is dimensionless and the same percentage spread gives the same fill probability
+    whatever the option's price level.
+
+    Both quotes are shifted by gamma * x_t, in PRICE units, where x_t is the inventory
+    carried into step t (contracts, positive = long): down when long, up when short.
+    With h the unskewed relative distance from the mid:
+        bid distance = h_bid + gamma * x / mid   ((mid - bid_eff) / mid)
+        ask distance = h_ask - gamma * x / mid   ((ask_eff - mid) / mid)
     Per timestep, independently:
         client sells (we buy at bid_eff) w.p. p0_sell * exp(-k_sell * bid distance)
         client buys  (we sell at ask_eff) w.p. p0_buy  * exp(-k_buy  * ask distance)
-    so the sell prob picks up exp(-k*gamma*x) and the buy prob exp(+k*gamma*x).
+    The skew is kept in price units (not scaled by the mid): a skew proportional to the
+    mid is huge for expensive options relative to their spread, so the quotes cross the
+    mid and trade at a loss.
     Probabilities are capped at 1 and the effective bid is floored at 0. Inventory
     feeds back into the next step's quotes, hence the loop over time.
     Returns (client_sells, client_buys, bid_eff, ask_eff); gamma = 0 gives no skew.
@@ -102,11 +108,12 @@ def simulate_client_flow(mid_px, bid_px, ask_px, p0_sell, k_sell, p0_buy, k_buy,
     ask_eff = np.full(mid_px.shape, np.nan)
     inventory = np.zeros(mid_px.shape[0])
     for j in range(mid_px.shape[1]):
+        mid = mid_px[:, j]
         shift = gamma * inventory
         bid_eff[:, j] = np.maximum(bid_px[:, j] - shift, 0.0)  # NaN stays NaN
         ask_eff[:, j] = ask_px[:, j] - shift
-        prob_sell = np.minimum(p0_sell * np.exp(-k_sell * (mid_px[:, j] - bid_eff[:, j])), 1.0)
-        prob_buy = np.minimum(p0_buy * np.exp(-k_buy * (ask_eff[:, j] - mid_px[:, j])), 1.0)
+        prob_sell = np.minimum(p0_sell * np.exp(-k_sell * (mid - bid_eff[:, j]) / mid), 1.0)
+        prob_buy = np.minimum(p0_buy * np.exp(-k_buy * (ask_eff[:, j] - mid) / mid), 1.0)
         client_sells[:, j] = u_sell[:, j] < prob_sell  # False where not quoting (NaN)
         client_buys[:, j] = u_buy[:, j] < prob_buy
         inventory = inventory + client_sells[:, j] - client_buys[:, j]
@@ -215,14 +222,14 @@ if __name__ == "__main__":
     MIN_HALF_SPREAD = 0.20  # minimum distance of bid/ask from mid, in option price units
     mid_px, bid_px, ask_px = compute_quotes(paths, K, TAU, R, SIGMA, VOL_SPREAD, MIN_HALF_SPREAD)
 
-    # Client flow: p(delta) = p0 * exp(-k * delta), delta = distance from mid in price units
-    P0_SELL, K_SELL = 0.30, 3.0
-    P0_BUY, K_BUY = 0.30, 3.0
+    # Client flow: p(delta) = p0 * exp(-k * delta), delta = distance from mid as a fraction of mid
+    P0_SELL, K_SELL = 0.30, 7.0
+    P0_BUY, K_BUY = 0.30, 7.0
 
-    # Inventory skew: shift = GAMMA * q price units per contract. gamma = 1 / (2 k sigma^2)
-    # applied to the variance-weighted inventory sigma^2 * q gives 1 / (2k), so sigma cancels.
+    # Inventory skew: both quotes shift by GAMMA price units per contract of inventory.
+    # 1 / (2 * 3) = 0.167 is the value from the earlier absolute-scale model with k = 3.
     USE_SKEW = True  # set False for GAMMA = 0 (no inventory skew)
-    GAMMA = 1 / (2 * K_SELL) if USE_SKEW else 0.0
+    GAMMA = 1 / 6 if USE_SKEW else 0.0
     client_sells, client_buys, bid_px, ask_px = simulate_client_flow(
         mid_px, bid_px, ask_px, P0_SELL, K_SELL, P0_BUY, K_BUY, gamma=GAMMA, seed=7)
 
