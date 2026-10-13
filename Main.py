@@ -88,6 +88,8 @@ def simulate_client_flow(mid_px, bid_px, ask_px, p0_sell, k_sell, p0_buy, k_buy,
     Per timestep, independently:
         client sells (we buy at bid_eff) w.p. p0_sell * exp(-k_sell * bid distance)
         client buys  (we sell at ask_eff) w.p. p0_buy  * exp(-k_buy  * ask distance)
+    gamma may be a scalar or an array of the same shape as mid_px (a per-step,
+    per-path skew per contract, e.g. one that scales with the option's price volatility).
     The skew is kept in price units (not scaled by the mid): a skew proportional to the
     mid is huge for expensive options relative to their spread, so the quotes cross the
     mid and trade at a loss.
@@ -99,6 +101,7 @@ def simulate_client_flow(mid_px, bid_px, ask_px, p0_sell, k_sell, p0_buy, k_buy,
         raise ValueError("p0_sell and p0_buy must each be in [0, 1]")
     if k_sell < 0 or k_buy < 0:
         raise ValueError("k_sell and k_buy must be non-negative")
+    gamma = np.broadcast_to(np.asarray(gamma, dtype=float), mid_px.shape)
     rng = np.random.default_rng(seed)
     u_sell = rng.random(mid_px.shape)
     u_buy = rng.random(mid_px.shape)
@@ -109,7 +112,7 @@ def simulate_client_flow(mid_px, bid_px, ask_px, p0_sell, k_sell, p0_buy, k_buy,
     inventory = np.zeros(mid_px.shape[0])
     for j in range(mid_px.shape[1]):
         mid = mid_px[:, j]
-        shift = gamma * inventory
+        shift = gamma[:, j] * inventory
         bid_eff[:, j] = np.maximum(bid_px[:, j] - shift, 0.0)  # NaN stays NaN
         ask_eff[:, j] = ask_px[:, j] - shift
         prob_sell = np.minimum(p0_sell * np.exp(-k_sell * (mid - bid_eff[:, j]) / mid), 1.0)
@@ -212,7 +215,7 @@ def plot_pnl_distribution(final_equity, title):
 
 if __name__ == "__main__":
     S0, MU, SIGMA = 100.0, 0.05, 0.20
-    T, N_STEPS, N_PATHS = 1.0, 252, 100
+    T, N_STEPS, N_PATHS = 1.0, 252, 1000
 
     t, paths = simulate_gbm(S0, MU, SIGMA, T, N_STEPS, N_PATHS, seed=42)
 
@@ -227,9 +230,10 @@ if __name__ == "__main__":
     P0_BUY, K_BUY = 0.30, 7.0
 
     # Inventory skew: both quotes shift by GAMMA price units per contract of inventory.
-    # 1 / (2 * 3) = 0.167 is the value from the earlier absolute-scale model with k = 3.
+    # 0.1 chosen from gamma_sweep.py (1000 paths): mean PnL within 1 s.e. of the best, with
+    # mean |position| about a third of the unskewed run.
     USE_SKEW = True  # set False for GAMMA = 0 (no inventory skew)
-    GAMMA = 1 / 6 if USE_SKEW else 0.0
+    GAMMA = 0.1 if USE_SKEW else 0.0
     client_sells, client_buys, bid_px, ask_px = simulate_client_flow(
         mid_px, bid_px, ask_px, P0_SELL, K_SELL, P0_BUY, K_BUY, gamma=GAMMA, seed=7)
 
